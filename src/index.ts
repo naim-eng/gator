@@ -1,3 +1,19 @@
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
+
+import {
+  randomBytes,
+  createHash,
+} from "node:crypto";
+
+import {
+  createApiKey,
+  getUserByApiKeyHash,
+} from "./lib/db/queries/apiKeys";
+
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
@@ -700,6 +716,294 @@ async function handlerTui(
     rl.close();
   }
 }
+
+function hashApiKey(token: string): string {
+  return createHash("sha256")
+    .update(token)
+    .digest("hex");
+}
+
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  data: unknown
+): void {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json");
+
+  res.end(JSON.stringify(data, null, 2));
+}
+
+async function authenticateRequest(
+  req: IncomingMessage
+): Promise<User | undefined> {
+  const authorization = req.headers.authorization;
+
+  if (!authorization?.startsWith("Bearer ")) {
+    return undefined;
+  }
+
+  const token = authorization.slice(7).trim();
+
+  if (!token) {
+    return undefined;
+  }
+
+  return await getUserByApiKeyHash(
+    hashApiKey(token)
+  );
+}
+
+async function readJsonBody(
+  req: IncomingMessage
+): Promise<any> {
+  let body = "";
+
+  for await (const chunk of req) {
+    body += chunk;
+  }
+
+  if (!body) {
+    return {};
+  }
+
+  return JSON.parse(body);
+}
+
+async function handlerApiKey(
+  cmdName: string,
+  user: User,
+  ...args: string[]
+): Promise<void> {
+  const token = randomBytes(32).toString("hex");
+
+  await createApiKey(
+    user.id,
+    hashApiKey(token)
+  );
+
+  console.log("API key created.");
+  console.log();
+  console.log(token);
+  console.log();
+  console.log(
+    "Save this key somewhere safe. It will not be shown again."
+  );
+}
+
+async function handleApiRequest(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  const url = new URL(
+    req.url ?? "/",
+    `http://${req.headers.host ?? "localhost"}`
+  );
+
+  if (
+    req.method === "GET" &&
+    url.pathname === "/health"
+  ) {
+    sendJson(res, 200, {
+      status: "ok",
+    });
+
+    return;
+  }
+
+  const user = await authenticateRequest(req);
+
+  if (!user) {
+    sendJson(res, 401, {
+      error: "Unauthorized",
+    });
+
+    return;
+  }
+
+  if (
+    req.method === "GET" &&
+    url.pathname === "/api/posts"
+  ) {
+    const requestedLimit = Number(
+      url.searchParams.get("limit") ?? "10"
+    );
+
+    const limit =
+      Number.isInteger(requestedLimit) &&
+      requestedLimit > 0
+        ? Math.min(requestedLimit, 100)
+        : 10;
+
+    const posts = await getPostsForUser(
+      user.id,
+      limit,
+      0,
+      "newest"
+    );
+
+    sendJson(res, 200, posts);
+    return;
+  }
+
+  if (
+    req.method === "GET" &&
+    url.pathname === "/api/bookmarks"
+  ) {
+    const bookmarks =
+      await getBookmarksForUser(user.id, 20);
+
+    sendJson(res, 200, bookmarks);
+    return;
+  }
+
+  if (
+    req.method === "POST" &&
+    url.pathname === "/api/bookmarks"
+  ) {
+    const body = await readJsonBody(req);
+
+    if (
+      typeof body.url !== "string" ||
+      !body.url
+    ) {
+      sendJson(res, 400, {
+        error: "url is required",
+      });
+
+      return;
+    }
+
+    const post = await getPostByUrl(body.url);
+
+    if (!post) {
+      sendJson(res, 404, {
+        error: "Post not found",
+      });
+
+      return;
+    }
+
+    await createBookmark(
+      user.id,
+      post.id
+    );
+
+    sendJson(res, 201, {
+      message: "Post bookmarked",
+      title: post.title,
+    });
+
+    return;
+  }
+
+  if (
+    req.method === "POST" &&
+    url.pathname === "/api/follow"
+  ) {
+    const body = await readJsonBody(req);
+
+    if (
+      typeof body.url !== "string" ||
+      !body.url
+    ) {
+      sendJson(res, 400, {
+        error: "url is required",
+      });
+
+      return;
+    }
+
+    const feed = await getFeedByUrl(body.url);
+
+    if (!feed) {
+      sendJson(res, 404, {
+        error: "Feed not found",
+      });
+
+      return;
+    }
+
+    await createFeedFollow(
+      user.id,
+      feed.id
+    );
+
+    sendJson(res, 201, {
+      message: "Feed followed",
+      feed: feed.name,
+    });
+
+    return;
+  }
+
+  sendJson(res, 404, {
+    error: "Not found",
+  });
+}
+
+async function handlerServe(
+  cmdName: string,
+  ...args: string[]
+): Promise<void> {
+  const port = args.length > 0
+    ? Number(args[0])
+    : 8080;
+
+  if (
+    !Number.isInteger(port) ||
+    port <= 0 ||
+    port > 65535
+  ) {
+    throw new Error("invalid port");
+  }
+
+  const server = createServer(
+    (req, res) => {
+      handleApiRequest(req, res).catch(
+        (err) => {
+          console.error(err);
+
+          if (!res.headersSent) {
+            sendJson(res, 500, {
+              error: "Internal server error",
+            });
+          }
+        }
+      );
+    }
+  );
+
+  await new Promise<void>(
+    (resolve, reject) => {
+      server.once("error", reject);
+
+      server.listen(
+        port,
+        "127.0.0.1",
+        () => {
+          console.log(
+            `Gator API running on http://127.0.0.1:${port}`
+          );
+
+          console.log(
+            "Press Ctrl+C to stop."
+          );
+        }
+      );
+
+      process.on("SIGINT", () => {
+        console.log(
+          "\nShutting down Gator API..."
+        );
+
+        server.close(() => {
+          resolve();
+        });
+      });
+    }
+  );
+}
 function registerCommand(
   registry: CommandsRegistry,
   cmdName: string,
@@ -802,6 +1106,19 @@ registerCommand(
   "tui",
   middlewareLoggedIn(handlerTui)
 );
+
+registerCommand(
+  registry,
+  "apikey",
+  middlewareLoggedIn(handlerApiKey)
+);
+
+registerCommand(
+  registry,
+  "serve",
+  handlerServe
+);
+
 const args = process.argv.slice(2);
 
   if (args.length < 1) {

@@ -85,6 +85,21 @@ export const postBookmarks = pgTable(
     userPostUnique: unique().on(table.userId, table.postId),
   }),
 );
+
+export const apiKeys = pgTable("api_keys", {
+  id: uuid("id").primaryKey().defaultRandom().notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at")
+    .notNull()
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+
+  tokenHash: text("token_hash").notNull().unique(),
+
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+});
 export type Post = typeof posts.$inferSelect;
 export type Feed = typeof feeds.$inferSelect;
 export type User = typeof users.$inferSelect;
