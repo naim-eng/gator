@@ -16,7 +16,8 @@ import {
   getFeeds,
   getFeedByUrl,
   createFeedFollow,
-  getFeedFollowsForUser,
+getFeedsToFetch,  
+getFeedFollowsForUser,
   deleteFeedFollow,
   markFeedFetched,
   getNextFeedToFetch,
@@ -275,38 +276,60 @@ function parseDuration(durationStr: string): number {
   }
 }
 
-async function scrapeFeeds(): Promise<void> {
-  const feed = await getNextFeedToFetch();
 
-  if (!feed) {
+
+
+async function scrapeSingleFeed(feed: Feed): Promise<void> {
+  console.log(`Fetching: ${feed.name} (${feed.url})`);
+
+  try {
+    const rssFeed = await fetchFeed(feed.url);
+
+    for (const item of rssFeed.channel.item) {
+      const publishedAt = new Date(item.pubDate);
+
+      if (Number.isNaN(publishedAt.getTime())) {
+        console.log(`Skipping invalid date: ${item.title}`);
+        continue;
+      }
+
+      await createPost(
+        item.title,
+        item.link,
+        item.description,
+        publishedAt,
+        feed.id
+      );
+    }
+
+    await markFeedFetched(feed.id);
+
+    console.log(`Finished: ${feed.name}`);
+  } catch (err) {
+    if (err instanceof Error) {
+      console.error(`Failed ${feed.name}: ${err.message}`);
+    } else {
+      console.error(`Failed ${feed.name}`);
+    }
+  }
+}
+
+async function scrapeFeeds(): Promise<void> {
+  const feedsToFetch = await getFeedsToFetch(3);
+
+  if (feedsToFetch.length === 0) {
     console.log("No feeds found");
     return;
   }
 
-  console.log(`Fetching: ${feed.name} (${feed.url})`);
+  console.log(
+    `Fetching ${feedsToFetch.length} feed(s) concurrently...`
+  );
 
-  const rssFeed = await fetchFeed(feed.url);
-
-  for (const item of rssFeed.channel.item) {
-    const publishedAt = new Date(item.pubDate);
-
-    if (Number.isNaN(publishedAt.getTime())) {
-      console.log(`Skipping post with invalid date: ${item.title}`);
-      continue;
-    }
-
-    await createPost(
-      item.title,
-      item.link,
-      item.description,
-      publishedAt,
-      feed.id
-    );
-  }
-
-  await markFeedFetched(feed.id);
+  await Promise.all(
+    feedsToFetch.map((feed) => scrapeSingleFeed(feed))
+  );
 }
-
 async function handlerBrowse(
   cmdName: string,
   user: User,

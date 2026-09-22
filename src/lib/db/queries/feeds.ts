@@ -138,3 +138,12 @@ export async function getNextFeedToFetch() {
 
   return result;
 }
+export async function getFeedsToFetch(limit: number = 3) {
+  const result = await db
+    .select()
+    .from(feeds)
+    .orderBy(sql`${feeds.lastFetchedAt} ASC NULLS FIRST`)
+    .limit(limit);
+
+  return result;
+}
