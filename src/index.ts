@@ -1,3 +1,6 @@
+import { createInterface } from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
+
 import { fetchFeed } from "./lib/rss";
 import { readConfig, setUser } from "./config";
 
@@ -558,6 +561,145 @@ async function handlerBookmarks(
   }
 }
 
+
+function cleanPostDescription(description: string | null): string {
+  return (description ?? "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .split("\n")
+    .filter(
+      (line) =>
+        !line.trim().startsWith("Article URL:") &&
+        !line.trim().startsWith("Comments URL:") &&
+        !line.trim().startsWith("Points:") &&
+        !line.trim().startsWith("# Comments:")
+    )
+    .join("\n")
+    .trim();
+}
+
+async function handlerTui(
+  cmdName: string,
+  user: User,
+  ...args: string[]
+): Promise<void> {
+  let limit = 10;
+
+  if (args.length > 0) {
+    limit = Number(args[0]);
+
+    if (!Number.isInteger(limit) || limit <= 0) {
+      throw new Error("limit must be a positive integer");
+    }
+  }
+
+  const rl = createInterface({
+    input,
+    output,
+  });
+
+  try {
+    while (true) {
+      const posts = await getPostsForUser(
+        user.id,
+        limit,
+        0,
+        "newest"
+      );
+
+      if (posts.length === 0) {
+        console.log("No posts found");
+        return;
+      }
+
+      console.clear();
+
+      console.log("==================================");
+      console.log("         GATOR POST READER");
+      console.log("==================================");
+      console.log();
+
+      for (let i = 0; i < posts.length; i++) {
+        const post = posts[i];
+
+        console.log(`${i + 1}. ${post.title}`);
+        console.log(`   Feed: ${post.feedName}`);
+        console.log(
+          `   Published: ${post.publishedAt.toLocaleString()}`
+        );
+        console.log();
+      }
+
+      console.log("q. Quit");
+
+      const answer = (
+        await rl.question("\nSelect a post: ")
+      )
+        .trim()
+        .toLowerCase();
+
+      if (answer === "q") {
+        return;
+      }
+
+      const selection = Number(answer);
+
+      if (
+        !Number.isInteger(selection) ||
+        selection < 1 ||
+        selection > posts.length
+      ) {
+        console.log("Invalid selection.");
+        await rl.question("Press Enter to continue...");
+        continue;
+      }
+
+      const post = posts[selection - 1];
+
+      console.clear();
+
+      console.log("==================================");
+      console.log(post.title);
+      console.log("==================================");
+      console.log();
+
+      console.log(`Feed: ${post.feedName}`);
+      console.log(`Published: ${post.publishedAt.toLocaleString()}`);
+      console.log();
+      console.log(`URL: ${post.url}`);
+      console.log();
+
+      const description = cleanPostDescription(
+        post.description
+      );
+
+      if (description) {
+        console.log("Description:");
+        console.log();
+        console.log(description);
+        console.log();
+      }
+
+      const next = (
+        await rl.question(
+          "Press Enter to go back, or q to quit: "
+        )
+      )
+        .trim()
+        .toLowerCase();
+
+      if (next === "q") {
+        return;
+      }
+    }
+  } finally {
+    rl.close();
+  }
+}
 function registerCommand(
   registry: CommandsRegistry,
   cmdName: string,
@@ -652,6 +794,13 @@ registerCommand(
   registry,
   "bookmarks",
   middlewareLoggedIn(handlerBookmarks)
+);
+
+
+registerCommand(
+  registry,
+  "tui",
+  middlewareLoggedIn(handlerTui)
 );
 const args = process.argv.slice(2);
 
