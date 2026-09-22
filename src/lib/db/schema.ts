@@ -62,6 +62,29 @@ export const posts = pgTable("posts", {
     .references(() => feeds.id, { onDelete: "cascade" }),
 });
 
+
+export const postBookmarks = pgTable(
+  "post_bookmarks",
+  {
+    id: uuid("id").primaryKey().defaultRandom().notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+
+    postId: uuid("post_id")
+      .notNull()
+      .references(() => posts.id, { onDelete: "cascade" }),
+  },
+  (table) => ({
+    userPostUnique: unique().on(table.userId, table.postId),
+  }),
+);
 export type Post = typeof posts.$inferSelect;
 export type Feed = typeof feeds.$inferSelect;
 export type User = typeof users.$inferSelect;

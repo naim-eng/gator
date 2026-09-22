@@ -1,10 +1,16 @@
 import { fetchFeed } from "./lib/rss";
 import { readConfig, setUser } from "./config";
+
 import {
   createPost,
   getPostsForUser,
   searchPostsForUser,
+  getPostByUrl,
+  createBookmark,
+  deleteBookmark,
+  getBookmarksForUser,
 } from "./lib/db/queries/posts";
+
 import {
   createFeed,
   getFeeds,
@@ -441,6 +447,94 @@ async function handlerSearch(
     console.log();
   }
 }
+
+async function handlerBookmark(
+  cmdName: string,
+  user: User,
+  ...args: string[]
+): Promise<void> {
+  if (args.length === 0) {
+    throw new Error("post URL is required");
+  }
+
+  const url = args[0];
+
+  const post = await getPostByUrl(url);
+
+  if (!post) {
+    throw new Error("post not found");
+  }
+
+  await createBookmark(user.id, post.id);
+
+  console.log(`Bookmarked: ${post.title}`);
+}
+
+
+async function handlerUnbookmark(
+  cmdName: string,
+  user: User,
+  ...args: string[]
+): Promise<void> {
+  if (args.length === 0) {
+    throw new Error("post URL is required");
+  }
+
+  const url = args[0];
+
+  const post = await getPostByUrl(url);
+
+  if (!post) {
+    throw new Error("post not found");
+  }
+
+  const deleted = await deleteBookmark(
+    user.id,
+    post.id
+  );
+
+  if (!deleted) {
+    throw new Error("bookmark not found");
+  }
+
+  console.log(`Removed bookmark: ${post.title}`);
+}
+
+
+async function handlerBookmarks(
+  cmdName: string,
+  user: User,
+  ...args: string[]
+): Promise<void> {
+  let limit = 10;
+
+  if (args.length > 0) {
+    limit = Number(args[0]);
+
+    if (!Number.isInteger(limit) || limit <= 0) {
+      throw new Error("limit must be a positive integer");
+    }
+  }
+
+  const bookmarks = await getBookmarksForUser(
+    user.id,
+    limit
+  );
+
+  if (bookmarks.length === 0) {
+    console.log("No bookmarks found");
+    return;
+  }
+
+  for (const post of bookmarks) {
+    console.log(`Title: ${post.title}`);
+    console.log(`Feed: ${post.feedName}`);
+    console.log(`URL: ${post.url}`);
+    console.log(`Published: ${post.publishedAt}`);
+    console.log();
+  }
+}
+
 function registerCommand(
   registry: CommandsRegistry,
   cmdName: string,
@@ -518,6 +612,24 @@ registerCommand(
   middlewareLoggedIn(handlerSearch)
 );
 
+
+registerCommand(
+  registry,
+  "bookmark",
+  middlewareLoggedIn(handlerBookmark)
+);
+
+registerCommand(
+  registry,
+  "unbookmark",
+  middlewareLoggedIn(handlerUnbookmark)
+);
+
+registerCommand(
+  registry,
+  "bookmarks",
+  middlewareLoggedIn(handlerBookmarks)
+);
 const args = process.argv.slice(2);
 
   if (args.length < 1) {
