@@ -3,8 +3,8 @@ import { readConfig, setUser } from "./config";
 import {
   createPost,
   getPostsForUser,
+  searchPostsForUser,
 } from "./lib/db/queries/posts";
-
 import {
   createFeed,
   getFeeds,
@@ -300,48 +300,104 @@ async function scrapeFeeds(): Promise<void> {
 
   await markFeedFetched(feed.id);
 }
+
 async function handlerBrowse(
   cmdName: string,
   user: User,
   ...args: string[]
 ): Promise<void> {
   let limit = 2;
+  let page = 1;
+  let sort: "newest" | "oldest" = "newest";
+  let feedName: string | undefined;
 
-  if (args.length > 0) {
+  let i = 0;
+
+  if (args.length > 0 && /^\d+$/.test(args[0])) {
     limit = Number(args[0]);
-
-    if (!Number.isInteger(limit) || limit <= 0) {
-      throw new Error("limit must be a positive integer");
-    }
+    i = 1;
   }
 
-  const userPosts = await getPostsForUser(user.id, limit);
+  while (i < args.length) {
+    if (args[i] === "--page") {
+      page = Number(args[i + 1]);
+      i += 2;
+      continue;
+    }
+
+    if (args[i] === "--sort") {
+      const value = args[i + 1];
+
+      if (value !== "newest" && value !== "oldest") {
+        throw new Error("sort must be newest or oldest");
+      }
+
+      sort = value;
+      i += 2;
+      continue;
+    }
+
+    if (args[i] === "--feed") {
+      feedName = args[i + 1];
+      i += 2;
+      continue;
+    }
+
+    throw new Error(`Unknown browse option: ${args[i]}`);
+  }
+
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new Error("limit must be a positive integer");
+  }
+
+  if (!Number.isInteger(page) || page <= 0) {
+    throw new Error("page must be a positive integer");
+  }
+
+  const offset = (page - 1) * limit;
+
+  const userPosts = await getPostsForUser(
+    user.id,
+    limit,
+    offset,
+    sort,
+    feedName
+  );
+
+  console.log(
+    `Page ${page} | Sort: ${sort}` +
+      (feedName ? ` | Feed: ${feedName}` : "")
+  );
+  console.log();
 
   for (const post of userPosts) {
     console.log(`Title: ${post.title}`);
+    console.log(`Feed: ${post.feedName}`);
     console.log(`URL: ${post.url}`);
     console.log(`Published: ${post.publishedAt}`);
-const cleanDescription = (post.description ?? "")
-  .replace(/<[^>]*>/g, "")
-  .replace(/&amp;/g, "&")
-  .replace(/&lt;/g, "<")
-  .replace(/&gt;/g, ">")
-  .replace(/&quot;/g, '"')
-  .replace(/&#39;/g, "'")
-  .split("\n")
-  .filter(
-    (line) =>
-      !line.trim().startsWith("Article URL:") &&
-      !line.trim().startsWith("Comments URL:") &&
-      !line.trim().startsWith("Points:") &&
-      !line.trim().startsWith("# Comments:")
-  )
-  .join("\n")
-  .trim();
 
-if (cleanDescription) {
-  console.log(`Description: ${cleanDescription}`);
-}
+    const cleanDescription = (post.description ?? "")
+      .replace(/<[^>]*>/g, "")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .split("\n")
+      .filter(
+        (line) =>
+          !line.trim().startsWith("Article URL:") &&
+          !line.trim().startsWith("Comments URL:") &&
+          !line.trim().startsWith("Points:") &&
+          !line.trim().startsWith("# Comments:")
+      )
+      .join("\n")
+      .trim();
+
+    if (cleanDescription) {
+      console.log(`Description: ${cleanDescription}`);
+    }
+
     console.log();
   }
 }
@@ -351,6 +407,40 @@ function printFeed(feed: Feed, user: User): void {
   console.log(`Added by: ${user.name}`);
 }
 
+
+async function handlerSearch(
+  cmdName: string,
+  user: User,
+  ...args: string[]
+): Promise<void> {
+  if (args.length === 0) {
+    throw new Error("search query is required");
+  }
+
+  const query = args.join(" ");
+
+  const results = await searchPostsForUser(
+    user.id,
+    query,
+    10
+  );
+
+  if (results.length === 0) {
+    console.log("No matching posts found");
+    return;
+  }
+
+  console.log(`Search results for: ${query}`);
+  console.log();
+
+  for (const post of results) {
+    console.log(`Title: ${post.title}`);
+    console.log(`Feed: ${post.feedName}`);
+    console.log(`URL: ${post.url}`);
+    console.log(`Published: ${post.publishedAt}`);
+    console.log();
+  }
+}
 function registerCommand(
   registry: CommandsRegistry,
   cmdName: string,
@@ -415,7 +505,20 @@ registerCommand(
   "unfollow",
   middlewareLoggedIn(handlerUnfollow)
 );
-  const args = process.argv.slice(2);
+ 
+registerCommand(
+  registry,
+  "unfollow",
+  middlewareLoggedIn(handlerUnfollow)
+);
+
+registerCommand(
+  registry,
+  "search",
+  middlewareLoggedIn(handlerSearch)
+);
+
+const args = process.argv.slice(2);
 
   if (args.length < 1) {
     console.error("Not enough arguments provided");
