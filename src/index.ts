@@ -1,3 +1,13 @@
+
+
+import { spawn, type ChildProcess } from "node:child_process";
+import {
+  readFile,
+  writeFile,
+  unlink,
+  appendFile,
+} from "node:fs/promises";
+
 import {
   createServer,
   type IncomingMessage,
@@ -1004,6 +1014,243 @@ async function handlerServe(
     }
   );
 }
+
+
+const SERVICE_PID_FILE = ".gator-service.pid";
+const SERVICE_LOG_FILE = ".gator-service.log";
+
+async function serviceLog(message: string): Promise<void> {
+  await appendFile(
+    SERVICE_LOG_FILE,
+    `[${new Date().toISOString()}] ${message}\n`
+  );
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function handlerService(
+  cmdName: string,
+  ...args: string[]
+): Promise<void> {
+  const action = args[0];
+
+  if (!action) {
+    throw new Error(
+      "usage: service <start|stop|status> [interval]"
+    );
+  }
+
+  if (action === "start") {
+    const interval = args[1] ?? "30s";
+
+    // Validate the duration before starting the background process
+    parseDuration(interval);
+
+    try {
+      const existingPid = Number(
+        (await readFile(SERVICE_PID_FILE, "utf8")).trim()
+      );
+
+      if (
+        Number.isInteger(existingPid) &&
+        isProcessRunning(existingPid)
+      ) {
+        console.log(
+          `Gator service is already running (PID ${existingPid})`
+        );
+        return;
+      }
+    } catch {
+      // No existing PID file
+    }
+
+    const supervisor = spawn(
+      "./node_modules/.bin/tsx",
+      ["./src/index.ts", "service-run", interval],
+      {
+        cwd: process.cwd(),
+        detached: true,
+        stdio: "ignore",
+      }
+    );
+
+    if (!supervisor.pid) {
+      throw new Error("failed to start Gator service");
+    }
+
+    await writeFile(
+      SERVICE_PID_FILE,
+      String(supervisor.pid)
+    );
+
+    supervisor.unref();
+
+    console.log(
+      `Gator service started in background (PID ${supervisor.pid})`
+    );
+    console.log(`Aggregator interval: ${interval}`);
+    console.log(`Logs: ${SERVICE_LOG_FILE}`);
+
+    return;
+  }
+
+  if (action === "status") {
+    try {
+      const pid = Number(
+        (await readFile(SERVICE_PID_FILE, "utf8")).trim()
+      );
+
+      if (
+        Number.isInteger(pid) &&
+        isProcessRunning(pid)
+      ) {
+        console.log(
+          `Gator service is running (PID ${pid})`
+        );
+      } else {
+        console.log("Gator service is not running");
+      }
+    } catch {
+      console.log("Gator service is not running");
+    }
+
+    return;
+  }
+
+  if (action === "stop") {
+    let pid: number;
+
+    try {
+      pid = Number(
+        (await readFile(SERVICE_PID_FILE, "utf8")).trim()
+      );
+    } catch {
+      console.log("Gator service is not running");
+      return;
+    }
+
+    if (!isProcessRunning(pid)) {
+      await unlink(SERVICE_PID_FILE).catch(() => {});
+      console.log("Gator service is not running");
+      return;
+    }
+
+    process.kill(pid, "SIGTERM");
+
+    await new Promise((resolve) =>
+      setTimeout(resolve, 1000)
+    );
+
+    await unlink(SERVICE_PID_FILE).catch(() => {});
+
+    console.log("Gator service stopped");
+    return;
+  }
+
+  throw new Error(
+    "usage: service <start|stop|status> [interval]"
+  );
+}
+
+async function handlerServiceRun(
+  cmdName: string,
+  ...args: string[]
+): Promise<void> {
+  const interval = args[0] ?? "30s";
+
+  parseDuration(interval);
+
+  let shuttingDown = false;
+  let child: ChildProcess | null = null;
+
+  await serviceLog(
+    `Service supervisor started. PID=${process.pid}, interval=${interval}`
+  );
+
+  await new Promise<void>((resolve) => {
+    const startAggregator = () => {
+      if (shuttingDown) {
+        resolve();
+        return;
+      }
+
+      child = spawn(
+        "./node_modules/.bin/tsx",
+        ["./src/index.ts", "agg", interval],
+        {
+          cwd: process.cwd(),
+          stdio: "ignore",
+        }
+      );
+
+      void serviceLog(
+        `Aggregator started. PID=${child.pid}`
+      );
+
+      child.once("exit", (code, signal) => {
+        void serviceLog(
+          `Aggregator exited. code=${code} signal=${signal}`
+        );
+
+        if (shuttingDown) {
+          resolve();
+          return;
+        }
+
+        void serviceLog(
+          "Aggregator crashed/stopped. Restarting in 2 seconds..."
+        );
+
+        setTimeout(startAggregator, 2000);
+      });
+
+      child.once("error", (err) => {
+        void serviceLog(
+          `Aggregator process error: ${err.message}`
+        );
+      });
+    };
+
+    const shutdown = (signal: string) => {
+      if (shuttingDown) {
+        return;
+      }
+
+      shuttingDown = true;
+
+      void serviceLog(
+        `Supervisor received ${signal}. Shutting down...`
+      );
+
+      if (child && child.exitCode === null) {
+        child.kill("SIGINT");
+      } else {
+        resolve();
+      }
+    };
+
+    process.on("SIGTERM", () =>
+      shutdown("SIGTERM")
+    );
+
+    process.on("SIGINT", () =>
+      shutdown("SIGINT")
+    );
+
+    startAggregator();
+  });
+
+  await unlink(SERVICE_PID_FILE).catch(() => {});
+
+  await serviceLog("Service supervisor stopped");
+}
 function registerCommand(
   registry: CommandsRegistry,
   cmdName: string,
@@ -1117,6 +1364,18 @@ registerCommand(
   registry,
   "serve",
   handlerServe
+);
+
+registerCommand(
+  registry,
+  "service",
+  handlerService
+);
+
+registerCommand(
+  registry,
+  "service-run",
+  handlerServiceRun
 );
 
 const args = process.argv.slice(2);
